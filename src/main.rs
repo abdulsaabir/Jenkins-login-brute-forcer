@@ -90,6 +90,31 @@ fn normalize_base_url(url: &str) -> Result<String> {
     Ok(s)
 }
 
+/// Strip path/query/fragment so we use the final origin after redirects (scheme + host + port).
+fn url_to_origin_string(u: &Url) -> String {
+    let mut o = u.clone();
+    o.set_path("");
+    o.set_query(None);
+    o.set_fragment(None);
+    let mut s = o.to_string();
+    while s.ends_with('/') {
+        s.pop();
+    }
+    s
+}
+
+/// Follow redirects with GET so a base like `http://host:80` resolves to `http://host:8000` when the
+/// server redirects. Login POSTs use `redirect::none()` and would otherwise never reach Jenkins.
+fn resolve_effective_base_url(client: &Client, base_url: &str) -> Result<String> {
+    let probe = base_url.trim_end_matches('/');
+    let res = client
+        .get(probe)
+        .send()
+        .with_context(|| format!("could not probe base URL (GET {probe})"))?;
+    let final_url = res.url().clone();
+    Ok(url_to_origin_string(&final_url))
+}
+
 fn target_login(
     client: &Client,
     base_url: &str,
@@ -207,7 +232,21 @@ fn run() -> Result<()> {
              Example: --url http://jenkins.example:8080"
         );
     }
-    let url = normalize_base_url(url)?;
+    let url_normalized = normalize_base_url(url)?;
+
+    let resolve_client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(32))
+        .build()?;
+
+    let url = resolve_effective_base_url(&resolve_client, &url_normalized)?;
+    if url != url_normalized {
+        eprintln!(
+            "[*] Base URL after HTTP redirects: {} → {}",
+            url_normalized, url
+        );
+    }
 
     let endpoint = args.endpoint.trim().trim_matches('/').to_string();
     if endpoint.is_empty() {

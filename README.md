@@ -1,6 +1,6 @@
 # jenkins_brute
 
-Hydra-style brute-forcer for Jenkins form login. Sends POST requests to the configured login endpoint (default: `j_spring_security_check`) and treats a successful login based on the HTTP `Location` header (redirect handling disabled).
+Hydra-style brute-forcer for Jenkins form login. Sends POST requests to the configured login endpoint (default: `j_spring_security_check`) and treats a successful login based on the HTTP `Location` header (redirect handling disabled on those POSTs). On startup it **GETs** your base URL with redirects enabled so a listener on port 80 that redirects to Jenkins on another port (e.g. 8000) is resolved to the real origin before brute-forcing.
 
 
 

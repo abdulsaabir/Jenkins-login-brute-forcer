@@ -1,4 +1,4 @@
-# Build release binaries when you push a tag like v1.1.0
+# Build release binaries when you push a tag like v1.0.0
 # Uploads assets to GitHub Releases for that tag.
 #
 # JS actions run on Node 24: FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 + current action majors

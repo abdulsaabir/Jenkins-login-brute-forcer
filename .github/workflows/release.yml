@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+# Use Node 24 for JS-based actions (GitHub deprecation of Node 20 on runners).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     strategy:
@@ -25,7 +29,7 @@ jobs:
             asset: jenkins_brute-macos-aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -43,7 +47,7 @@ jobs:
             chmod +x "dist/${{ matrix.asset }}"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -52,7 +56,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true

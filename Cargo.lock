@@ -685,6 +685,7 @@ dependencies = [
  "num_cpus",
  "rayon",
  "reqwest",
+ "url",
 ]
 
 [[package]]

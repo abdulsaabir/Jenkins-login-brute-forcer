@@ -99,6 +99,7 @@ More concurrent workers (e.g. huge lists):
 
 ## Notes
 
+- If `--url` has no port, **`http://` is normalized to port 80** and **`https://` to port 443** (shown explicitly in `[*] Target:`). Jenkins on another port (e.g. 8080) must still be given as `http://host:8080`.
 - Requests use a 10s connect and overall timeout; redirects are not followed (login success is inferred from headers).
 - Default thread count is tuned for **I/O-bound** HTTP work, not CPU core count only.
 

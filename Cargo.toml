@@ -9,3 +9,4 @@ rayon = "1.8"
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 num_cpus = "1.13"
+url = "2.5"
